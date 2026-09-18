@@ -124,9 +124,23 @@ def _build_library_summary() -> str:
             )
         else:
             moegirl = "萌娘百科：（未找到内置索引数据）"
-        bangumi_state = (
-            "bangumi 资料库：已内置" if bangumi.available() else "bangumi 资料库：（未内置）"
-        )
+        if bangumi.available():
+            detail = ""
+            try:
+                info = bangumi.stats()
+                total = sum(info.get("counts", {}).values())
+                source_date = str(info.get("source_date") or "").strip()
+                parts = []
+                if total:
+                    parts.append(f"约 {total / 10000:.1f} 万条")
+                if source_date:
+                    parts.append(f"数据 {source_date}")
+                detail = f"（{'，'.join(parts)}）" if parts else ""
+            except Exception:
+                detail = ""
+            bangumi_state = f"bangumi 资料库：已内置{detail}"
+        else:
+            bangumi_state = "bangumi 资料库：（未内置）"
         return f"{moegirl}；{bangumi_state}"
     except Exception:
         return "（内置数据检测失败）"
@@ -188,7 +202,7 @@ class KnowledgeConfig(PluginConfigBase):
         json_schema_extra={
             "label": "已加载知识库",
             "disabled": True,
-            "hint": "随插件内置数据生成；运行详情（片段数/构建时间）可发 /kb_stats 查看",
+            "hint": "打开配置页时实时检测（含 bangumi 数据日期）；运行详情（片段数/构建时间）可发 /kb_stats 查看",
         },
     )
 
@@ -210,6 +224,38 @@ class KnowledgeBasePlugin(MaiBotPlugin):
         self._index: Optional[knowledge.KnowledgeIndex] = None
         self._lock = asyncio.Lock()
         self._load_task: Optional[asyncio.Task] = None
+
+    def get_webui_config_schema(
+        self,
+        *,
+        plugin_id: str = "",
+        plugin_name: str = "",
+        plugin_version: str = "",
+        plugin_description: str = "",
+        plugin_author: str = "",
+    ) -> Dict[str, Any]:
+        """配置 Schema：把「已加载知识库」只读字段刷新为实时检测值。
+
+        宿主的字段 default 只在生成 config.toml 时写入一次、之后不再变化；
+        这里在每次打开配置页时用当前实测结果覆盖展示值（含 bangumi 数据日期），
+        避免换过 kb_data 后页面仍显示旧信息。
+        """
+        schema = super().get_webui_config_schema(
+            plugin_id=plugin_id,
+            plugin_name=plugin_name,
+            plugin_version=plugin_version,
+            plugin_description=plugin_description,
+            plugin_author=plugin_author,
+        )
+        try:
+            section = (schema.get("sections") or {}).get("knowledge") or {}
+            fields = section.get("fields") or {}
+            field = fields.get("bundled_libraries")
+            if isinstance(field, dict):
+                field["default"] = _build_library_summary()
+        except Exception:
+            pass
+        return schema
 
     # ── 生命周期 ──
 
