@@ -1,0 +1,17 @@
+# ── 运行时数据：体积大（约 360 MB），暂不入库；发布时随插件包分发 ──
+/kb_data/
+
+# ── 开发侧内容统一在 dev/ 下（源数据 / 构建工具 / 测试 / 开发文档）——不入库 ──
+/dev/*
+# 例外：bangumi 重建所需的映射表（四个 yml，约 70 KB；Actions 构建要用，随仓库分发）
+!/dev/tools/
+/dev/tools/*
+!/dev/tools/bangumi_maps/
+
+# Runner 自动生成维护的插件配置
+/config.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/

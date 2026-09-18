@@ -1,0 +1,93 @@
+name: 周更 bangumi 数据包
+
+# 数据源：bangumi/Archive —— 每周三 05:00 (GMT+8) 更新 Releases（固定 tag=archive），
+# 当周包地址以其 aux/latest.json 为准（勿硬编码资源名）。
+# 本工作流每周四 06:00 (GMT+8) 拉取最新包 → 重建 kb_data/bangumi.db
+# （数据源日期写入 meta.source_date，/kb_stats 可见）→ 发独立 Release
+# （tag data-<日期>，附件 bangumi-db-<日期>.zip）。
+# 附件只保留最近两个数据 Release（一旧一新）；萌百索引包随代码版本手动发。
+on:
+  schedule:
+    - cron: "0 22 * * 3"  # 每周三 22:00 UTC = 周四 06:00 GMT+8
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装构建依赖
+        run: pip install jieba
+
+      - name: 解析 Archive 最新数据包
+        id: archive
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+
+          url = "https://raw.githubusercontent.com/bangumi/Archive/master/aux/latest.json"
+          with urllib.request.urlopen(url, timeout=60) as resp:
+              meta = json.load(resp)
+
+          name = str(meta.get("name") or "")
+          match = re.search(r"dump-(\d{4}-\d{2}-\d{2})", name)
+          source_date = match.group(1) if match else ""
+
+          digest = str(meta.get("digest") or "").replace("sha256:", "")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"url={meta.get('browser_download_url', '')}\n")
+              handle.write(f"name={name}\n")
+              handle.write(f"date={source_date}\n")
+              handle.write(f"digest={digest}\n")
+          PY
+
+      - name: 下载并解包（SHA256 校验）
+        run: |
+          curl -fL --retry 3 -o /tmp/dump.zip "${{ steps.archive.outputs.url }}"
+          echo "${{ steps.archive.outputs.digest }}  /tmp/dump.zip" | sha256sum -c -
+          mkdir -p /tmp/dump
+          unzip -q /tmp/dump.zip -d /tmp/dump
+          mkdir -p dev/topics/bangumi/jsonlines
+          find /tmp/dump -name "*.jsonlines" -exec cp -f {} dev/topics/bangumi/jsonlines/ \;
+          ls -lh dev/topics/bangumi/jsonlines/
+
+      - name: 构建 bangumi.db（数据源日期写入 meta）
+        run: python dev/tools/build_bangumi_db.py --source-date "${{ steps.archive.outputs.date }}"
+
+      - name: 打包
+        run: |
+          cd kb_data
+          zip -q "../bangumi-db-${{ steps.archive.outputs.date }}.zip" bangumi.db
+          cd ..
+          ls -lh "bangumi-db-${{ steps.archive.outputs.date }}.zip"
+
+      - name: 发布 Release（保留一旧一新）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          TAG="data-${{ steps.archive.outputs.date }}"
+          ASSET="bangumi-db-${{ steps.archive.outputs.date }}.zip"
+          NOTES="数据源：bangumi/Archive ${{ steps.archive.outputs.name }}（sha256 ${{ steps.archive.outputs.digest }}）；构建时已将数据源日期写入 meta.source_date（/kb_stats 可见）。"
+          gh release create "$TAG" "$ASSET" \
+            --title "bangumi 数据 ${{ steps.archive.outputs.date }}" \
+            --notes "$NOTES" \
+            || gh release upload "$TAG" "$ASSET" --clobber
+          # 仅保留最近两个数据 Release（一旧一新）
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("data-"))] | sort_by(.createdAt) | reverse | .[2:] | .[].tagName' \
+            | while read -r old; do
+                if [ -n "$old" ]; then gh release delete "$old" --yes --cleanup-tag; fi
+              done
+          gh release list --limit 5
