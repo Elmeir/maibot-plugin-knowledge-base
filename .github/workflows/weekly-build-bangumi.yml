@@ -79,10 +79,12 @@ jobs:
           set -e
           TAG="data-${{ steps.archive.outputs.date }}"
           ASSET="bangumi-db-${{ steps.archive.outputs.date }}.zip"
-          NOTES="数据源：bangumi/Archive ${{ steps.archive.outputs.name }}（sha256 ${{ steps.archive.outputs.digest }}）；构建时已将数据源日期写入 meta.source_date（/kb_stats 可见）。"
+          # 萌百索引包链接固定指向 v1.0.0 附件；将来发新的萌百索引包时同步更新此链接
+          NOTES="📦 **数据包下载清单**（两个 zip，解压后放入插件目录的 \`kb_data/\`）：\n- **萌百索引包**（固定链接，不随周更变化）：https://github.com/Elmeir/maibot-plugin-knowledge-base/releases/download/v1.0.0/moegirl-index-v1.0.0.zip\n- **bangumi 数据包**（本页附件）：$ASSET\n\n只用萌百可不装 bangumi 包（对应工具提示「未收录」，互不影响）。\n数据源：bangumi/Archive ${{ steps.archive.outputs.name }}（sha256 ${{ steps.archive.outputs.digest }}）；数据日期已写入 meta.source_date（/kb_stats 可见）。"
+          printf "%b" "$NOTES" > /tmp/release-notes.md
           gh release create "$TAG" "$ASSET" \
             --title "bangumi 数据 ${{ steps.archive.outputs.date }}" \
-            --notes "$NOTES" \
+            --notes-file /tmp/release-notes.md \
             || gh release upload "$TAG" "$ASSET" --clobber
           # 仅保留最近两个数据 Release（一旧一新）
           gh release list --limit 100 --json tagName,createdAt \
