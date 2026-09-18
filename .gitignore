@@ -3,10 +3,11 @@
 
 # ── 开发侧内容统一在 dev/ 下（源数据 / 构建工具 / 测试 / 开发文档）——不入库 ──
 /dev/*
-# 例外：bangumi 重建所需的映射表（四个 yml，约 70 KB；Actions 构建要用，随仓库分发）
+# 例外（Actions 构建需要，随仓库分发）：build_bangumi_db.py 与四个映射表 yml（约 70 KB）
 !/dev/tools/
 /dev/tools/*
 !/dev/tools/bangumi_maps/
+!/dev/tools/build_bangumi_db.py
 
 # Runner 自动生成维护的插件配置
 /config.toml
