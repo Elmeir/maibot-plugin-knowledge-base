@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "id": "github.elmeir.knowledge-base",
   "name": "知识库",
   "description": "自带萌娘百科与 Bangumi 离线资料库，注册 search_knowledge / search_bangumi / get_bangumi_season / browse_bangumi 工具供 LLM 按需查询与筛选。",
