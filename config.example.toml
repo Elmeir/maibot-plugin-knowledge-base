@@ -1,0 +1,39 @@
+# 知识库插件配置参考示例
+# 说明：宿主首次加载会自动生成完整 config.toml；本文件只列出结构骨架，
+#       全部字段的中文说明见 WebUI 各页签（知识库 / 调试）。
+
+[plugin]
+config_version = "1.1.0"     # 勿手改
+
+[knowledge]                  # 知识库（检索参数；已加载知识库为只读展示）
+top_k = 4                    # 每次检索默认返回的片段数（1-8）
+max_chars = 300              # 单个片段返回给模型的最大字符数（200-800）
+bundled_libraries = ""       # 只读展示：已加载知识库（自动写入，勿手改；详情发 /kb_stats）
+
+[debug]                      # 调试
+enabled = false              # 诊断日志（工具调用参数与结果统计；日志搜「知识库·调试」）
+
+# 以下为调试页「组件信息」只读展示段：内容由插件加载时自动写入（勿手改）
+[tool_search_knowledge]
+visibility = ""
+description = ""
+parameters = ""
+
+[tool_search_bangumi]
+visibility = ""
+description = ""
+parameters = ""
+
+[tool_get_bangumi_season]
+visibility = ""
+description = ""
+parameters = ""
+
+[tool_browse_bangumi]
+visibility = ""
+description = ""
+parameters = ""
+
+[command_kb_stats]
+description = ""
+pattern = ""

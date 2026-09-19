@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,7 +35,7 @@ except ImportError:  # 仅独立调试（插件目录在 sys.path）时走这里
     import knowledge
     from knowledge import bangumi
 
-SUPPORTED_CONFIG_VERSION = "1.0.0"
+SUPPORTED_CONFIG_VERSION = "1.1.0"
 
 # 描述中的主题数量上限：知识库再多也只列前 5 个 + "等"
 _THEME_LIMIT = 5
@@ -207,11 +208,291 @@ class KnowledgeConfig(PluginConfigBase):
     )
 
 
+class DebugSectionConfig(PluginConfigBase):
+    """调试配置。"""
+
+    __ui_label__ = "调试"
+    __ui_icon__ = "terminal"
+    __ui_order__ = 2
+
+    enabled: bool = Field(
+        default=False,
+        description="输出诊断日志（工具调用参数与耗时）",
+        json_schema_extra={
+            "label": "诊断日志",
+            "hint": "开=工具调用时输出查询参数与结果统计（日志搜「知识库·调试」）；排查检索问题时打开",
+        },
+    )
+
+
+class ToolInfoBaseConfig(PluginConfigBase):
+    """工具信息基类（只读展示：LLM 视角的工具定义，加载时自动写入）。
+
+    WebUI 对字段的显示值取自配置值本身（schema.default 会被空配置值覆盖），
+    展示文本由 on_load 写入 config.toml 对应段；读取处忽略这些字段（纯展示）。
+    """
+
+    __ui_icon__ = "wrench"
+    __ui_order__ = 10
+
+    visibility: str = Field(
+        default="",
+        description="工具对 LLM 的可见性（运行时生成，只读）",
+        json_schema_extra={
+            "label": "可见性",
+            "hint": "deferred = 不在常驻工具列表（按需发现，可被 tool_search 搜到）；visible = 始终提供给 LLM",
+            "disabled": True,
+            "rows": 2,
+        },
+    )
+    description: str = Field(
+        default="",
+        description="LLM 看到的工具描述（运行时生成，只读）",
+        json_schema_extra={
+            "label": "描述",
+            "hint": "LLM 实际看到的工具描述；每次插件加载时自动刷新",
+            "disabled": True,
+            "rows": 6,
+        },
+    )
+    parameters: str = Field(
+        default="",
+        description="工具参数清单（运行时生成，只读）",
+        json_schema_extra={
+            "label": "参数",
+            "hint": "每个参数一行：名称（类型，必填/可选）：说明",
+            "disabled": True,
+            "rows": 6,
+        },
+    )
+
+
+class ToolSearchKnowledgeConfig(ToolInfoBaseConfig):
+    """萌娘百科检索工具（search_knowledge）。"""
+
+    __ui_label__ = "search_knowledge"
+
+
+class ToolSearchBangumiConfig(ToolInfoBaseConfig):
+    """Bangumi 检索工具（search_bangumi）。"""
+
+    __ui_label__ = "search_bangumi"
+
+
+class ToolGetBangumiSeasonConfig(ToolInfoBaseConfig):
+    """新番季度列表工具（get_bangumi_season）。"""
+
+    __ui_label__ = "get_bangumi_season"
+
+
+class ToolBrowseBangumiConfig(ToolInfoBaseConfig):
+    """Bangumi 筛选工具（browse_bangumi）。"""
+
+    __ui_label__ = "browse_bangumi"
+
+
+class CommandInfoBaseConfig(PluginConfigBase):
+    """命令信息基类（只读展示：命令描述与匹配模式）。"""
+
+    __ui_icon__ = "terminal"
+    __ui_order__ = 11
+
+    description: str = Field(
+        default="",
+        description="命令描述（运行时生成，只读）",
+        json_schema_extra={
+            "label": "描述",
+            "hint": "命令的说明文本；每次插件加载时自动刷新",
+            "disabled": True,
+            "rows": 2,
+        },
+    )
+    pattern: str = Field(
+        default="",
+        description="命令匹配模式（运行时生成，只读）",
+        json_schema_extra={
+            "label": "匹配模式",
+            "hint": "触发该命令的正则模式",
+            "disabled": True,
+            "rows": 2,
+        },
+    )
+
+
+class CommandKbStatsConfig(CommandInfoBaseConfig):
+    """状态命令（kb_stats）。"""
+
+    __ui_label__ = "kb_stats"
+
+
+def _collect_tool_info(handler: Any) -> Dict[str, str]:
+    """从组件声明生成单个工具的展示字段（可见性 / 描述 / 参数）。"""
+    info = getattr(handler, "__maibot_component_info__", None)
+    if info is None:
+        return {}
+    metadata = getattr(info, "metadata", None)
+    visibility = ""
+    if isinstance(metadata, dict):
+        visibility = str(metadata.get("visibility") or "").strip()
+    description = str(
+        getattr(info, "brief_description", "") or getattr(info, "description", "") or ""
+    ).strip() or "（无描述）"
+    parameters = getattr(info, "parameters", None) or []
+    param_lines: List[str] = []
+    for param in parameters:
+        param_name = str(getattr(param, "name", "") or "")
+        param_type = getattr(param, "param_type", None)
+        type_text = (
+            getattr(param_type, "value", None)
+            or getattr(param_type, "name", None)
+            or "string"
+        )
+        required = "必填" if bool(getattr(param, "required", False)) else "可选"
+        param_desc = str(getattr(param, "description", "") or "")
+        param_lines.append(f"{param_name}（{type_text}，{required}）: {param_desc}")
+    return {
+        "visibility": visibility or "deferred（未显式声明时的宿主默认）",
+        "description": description,
+        "parameters": "\n".join(param_lines) if param_lines else "（无参数）",
+    }
+
+
+def _collect_command_info(handler: Any) -> Dict[str, str]:
+    """从组件声明生成单个命令的展示字段（描述 / 匹配模式）。"""
+    info = getattr(handler, "__maibot_component_info__", None)
+    if info is None:
+        return {}
+    return {
+        "description": str(getattr(info, "description", "") or "").strip()
+        or "（无描述）",
+        "pattern": str(getattr(info, "command_pattern", "") or "").strip() or "（无）",
+    }
+
+
+def _collect_all_component_info() -> Dict[str, Dict[str, str]]:
+    """收集全部组件的展示字段（段名 → 字段字典）。"""
+    return {
+        "tool_search_knowledge": _collect_tool_info(
+            KnowledgeBasePlugin.handle_search_knowledge
+        ),
+        "tool_search_bangumi": _collect_tool_info(
+            KnowledgeBasePlugin.handle_search_bangumi
+        ),
+        "tool_get_bangumi_season": _collect_tool_info(
+            KnowledgeBasePlugin.handle_get_bangumi_season
+        ),
+        "tool_browse_bangumi": _collect_tool_info(
+            KnowledgeBasePlugin.handle_browse_bangumi
+        ),
+        "command_kb_stats": _collect_command_info(KnowledgeBasePlugin.handle_kb_stats),
+    }
+
+
+def _sync_component_info_sections(
+    values: Dict[str, Dict[str, Any]], config_path: Optional[Path] = None
+) -> None:
+    """把只读展示字段写入 config.toml 对应段（每段内容有变化才写）。
+
+    实现与 reply-control 一致：段内容完全由本函数管理（整段重写），文本用
+    JSON 转义（TOML 基础字符串兼容）；失败静默（不影响插件运行）。
+    仅用于"全字段只读"的专用段；混合段（含用户字段）请用 _replace_field_line。
+    """
+    if not values:
+        return
+    try:
+        target = config_path or (Path(__file__).parent / "config.toml")
+        if not target.exists():
+            return
+        content = target.read_text(encoding="utf-8")
+        original = content
+        for section, fields in values.items():
+            if not fields:
+                continue
+            body = [
+                f"{name} = " + json.dumps(value, ensure_ascii=False)
+                for name, value in fields.items()
+            ]
+            content = _replace_section_body(content, section, body)
+        if content != original:
+            target.write_text(content, encoding="utf-8")
+    except Exception:
+        pass  # 展示同步失败不影响插件运行
+
+
+def _replace_section_body(content: str, section: str, body: List[str]) -> str:
+    """重写 TOML 指定段的段体（段不存在时追加）；内容未变化时原样返回。"""
+    lines = content.splitlines()
+    start: Optional[int] = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == f"[{section}]":
+            start = index
+            continue
+        if start is not None and stripped.startswith("[") and stripped.endswith("]"):
+            end = index
+            break
+    trailing = "\n" if content.endswith("\n") else ""
+    if start is None:
+        suffix = "" if content.endswith("\n") else "\n"
+        return f"{content}{suffix}\n[{section}]\n" + "\n".join(body) + "\n"
+    current = [line for line in lines[start + 1 : end] if line.strip()]
+    if current == body:
+        return content  # 未变化：不写盘、不触发配置事件
+    if end >= len(lines):
+        return "\n".join([*lines[: start + 1], *body]) + trailing
+    return "\n".join([*lines[: start + 1], *body, "", *lines[end:]]) + trailing
+
+
+def _replace_field_line(content: str, section: str, field: str, rendered_line: str) -> str:
+    """替换 TOML 指定段内单个字段行（保留段内其它行）；字段缺失时插到段首。
+
+    用于混合段（同时含用户配置字段与只读展示字段）的单字段更新。
+    """
+    lines = content.splitlines()
+    start: Optional[int] = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == f"[{section}]":
+            start = index
+            continue
+        if start is not None and stripped.startswith("[") and stripped.endswith("]"):
+            end = index
+            break
+    trailing = "\n" if content.endswith("\n") else ""
+    if start is None:
+        suffix = "" if content.endswith("\n") else "\n"
+        return f"{content}{suffix}\n[{section}]\n{rendered_line}\n"
+    for index in range(start + 1, end):
+        if lines[index].strip().split("=", 1)[0].strip() == field:
+            if lines[index].strip() == rendered_line:
+                return content  # 未变化：不写盘
+            lines[index] = rendered_line
+            return "\n".join(lines) + trailing
+    lines.insert(start + 1, rendered_line)
+    return "\n".join(lines) + trailing
+
+
 class KnowledgeBasePluginConfig(PluginConfigBase):
     """知识库插件完整配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    debug: DebugSectionConfig = Field(default_factory=DebugSectionConfig)
+    tool_search_knowledge: ToolSearchKnowledgeConfig = Field(
+        default_factory=ToolSearchKnowledgeConfig
+    )
+    tool_search_bangumi: ToolSearchBangumiConfig = Field(
+        default_factory=ToolSearchBangumiConfig
+    )
+    tool_get_bangumi_season: ToolGetBangumiSeasonConfig = Field(
+        default_factory=ToolGetBangumiSeasonConfig
+    )
+    tool_browse_bangumi: ToolBrowseBangumiConfig = Field(
+        default_factory=ToolBrowseBangumiConfig
+    )
+    command_kb_stats: CommandKbStatsConfig = Field(default_factory=CommandKbStatsConfig)
 
 
 class KnowledgeBasePlugin(MaiBotPlugin):
@@ -247,6 +528,27 @@ class KnowledgeBasePlugin(MaiBotPlugin):
             plugin_description=plugin_description,
             plugin_author=plugin_author,
         )
+        sections = schema.get("sections")
+        if isinstance(sections, dict):
+            sections.pop("plugin", None)
+            schema["layout"] = {
+                "type": "tabs",
+                "tabs": [
+                    {"id": "knowledge", "title": "知识库", "sections": ["knowledge"]},
+                    {
+                        "id": "debug",
+                        "title": "调试",
+                        "sections": [
+                            "debug",
+                            "tool_search_knowledge",
+                            "tool_search_bangumi",
+                            "tool_get_bangumi_season",
+                            "tool_browse_bangumi",
+                            "command_kb_stats",
+                        ],
+                    },
+                ],
+            }
         try:
             section = (schema.get("sections") or {}).get("knowledge") or {}
             fields = section.get("fields") or {}
@@ -255,6 +557,18 @@ class KnowledgeBasePlugin(MaiBotPlugin):
                 field["default"] = _build_library_summary()
         except Exception:
             pass
+        # 组件信息卡：字段 default 注入（双保险；框内值由 on_load 写入配置值）
+        for section_name, info_fields in _collect_all_component_info().items():
+            section = (schema.get("sections") or {}).get(section_name)
+            if not isinstance(section, dict):
+                continue
+            section_fields = section.get("fields")
+            if not isinstance(section_fields, dict):
+                continue
+            for field_name, value in info_fields.items():
+                field = section_fields.get(field_name)
+                if isinstance(field, dict):
+                    field["default"] = value
         return schema
 
     # ── 生命周期 ──
@@ -267,6 +581,29 @@ class KnowledgeBasePlugin(MaiBotPlugin):
         一律温和降级（对应工具返回"未收录"提示），不作为错误上报。
         """
         self._start_load("知识库初始化")
+        # 只读展示：写入配置值（WebUI 取值依赖配置值本身）
+        self._sync_readonly_sections()
+
+    def _sync_readonly_sections(self) -> None:
+        """把只读展示（组件信息 + 已加载知识库）写入 config.toml（内容有变化才写）。"""
+        # 组件信息：专用段整段重写
+        _sync_component_info_sections(_collect_all_component_info())
+        # 已加载知识库：knowledge 段为混合段（含用户字段），只替换单个字段行
+        try:
+            target = Path(__file__).parent / "config.toml"
+            if not target.exists():
+                return
+            content = target.read_text(encoding="utf-8")
+            rendered = "bundled_libraries = " + json.dumps(
+                _build_library_summary(), ensure_ascii=False
+            )
+            new_content = _replace_field_line(
+                content, "knowledge", "bundled_libraries", rendered
+            )
+            if new_content != content:
+                target.write_text(new_content, encoding="utf-8")
+        except Exception:
+            pass  # 展示同步失败不影响插件运行
 
     def _start_load(self, reason: str) -> None:
         """起一个后台加载任务（配置热更新重载与首次启动共用）。"""
